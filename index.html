@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Audio Reactive Particles</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            color: #fff;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+        
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        
+        button {
+            background: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        
+        #canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        #info {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        
+        .control-row {
+            margin: 10px 0;
+        }
+        
+        input[type="range"] {
+            width: 150px;
+            margin: 0 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <h3>🎵 Simple Particle System</h3>
+        <div class="control-row">
+            <label>Audio Device:</label>
+            <select id="deviceSelect"></select>
+        </div>
+        <div class="control-row">
+            <button id="startBtn">🎤 Start Audio</button>
+            <button id="stopBtn" disabled>⏹ Stop</button>
+        </div>
+        <div class="control-row">
+            <label>Sensitivity: <span id="sensitivityValue">2.0</span></label>
+            <input type="range" id="sensitivity" min="0.5" max="5.0" step="0.1" value="2.0">
+        </div>
+        <div class="control-row">
+            <label>Particle Count: <span id="particleCountValue">2000</span></label>
+            <input type="range" id="particleCount" min="500" max="5000" step="100" value="2000">
+        </div>
+    </div>
+    
+    <canvas id="canvas"></canvas>
+    
+    <div id="info">
+        <div>🔊 Volume: <span id="volumeLevel">0</span>%</div>
+        <div>🎵 Bass: <span id="bassLevel">0</span>%</div>
+        <div>🔄 Status: <span id="status">Ready</span></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        class SimpleParticleSystem {
+            constructor() {
+                console.log('Initializing Simple Particle System...');
+                
+                // Three.js基本設定
+                this.canvas = document.getElementById('canvas');
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+                
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setClearColor(0x000011);
+                this.camera.position.z = 50;
+                
+                // 音声関連
+                this.audioContext = null;
+                this.analyser = null;
+                this.dataArray = null;
+                this.stream = null;
+                
+                // パーティクル設定
+                this.particleCount = 2000;
+                this.particles = null;
+                this.particlePositions = null;
+                this.originalPositions = null;
+                
+                // コントロール変数
+                this.sensitivity = 2.0;
+                this.volume = 0;
+                this.bassLevel = 0;
+                
+                this.initializeSystem();
+            }
+            
+            async initializeSystem() {
+                this.createParticles();
+                this.setupControls();
+                await this.loadAudioDevices();
+                this.setupEventListeners();
+                this.startRendering();
+                
+                console.log('System ready!');
+            }
+            
+            createParticles() {
+                console.log(`Creating ${this.particleCount} particles...`);
+                
+                // 既存のパーティクルがあれば削除
+                if (this.particles) {
+                    this.scene.remove(this.particles);
+                }
+                
+                // パーティクルの初期位置を生成
+                this.particlePositions = new Float32Array(this.particleCount * 3);
+                this.originalPositions = new Float32Array(this.particleCount * 3);
+                
+                for (let i = 0; i < this.particleCount; i++) {
+                    const i3 = i * 3;
+                    
+                    // 球状に配置
+                    const radius = Math.random() * 30 + 10;
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.random() * Math.PI;
+                    
+                    const x = radius * Math.sin(phi) * Math.cos(theta);
+                    const y = radius * Math.sin(phi) * Math.sin(theta);
+                    const z = radius * Math.cos(phi);
+                    
+                    this.particlePositions[i3] = x;
+                    this.particlePositions[i3 + 1] = y;
+                    this.particlePositions[i3 + 2] = z;
+                    
+                    // オリジナル位置も保存
+                    this.originalPositions[i3] = x;
+                    this.originalPositions[i3 + 1] = y;
+                    this.originalPositions[i3 + 2] = z;
+                }
+                
+                // ジオメトリとマテリアル作成
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.BufferAttribute(this.particlePositions, 3));
+                
+                // 円形パーティクル用のテクスチャ作成
+                const canvas = document.createElement('canvas');
+                canvas.width = 32;
+                canvas.height = 32;
+                const ctx = canvas.getContext('2d');
+                
+                // 円形のグラデーションを描画
+                const gradient = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+                gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+                gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.8)');
+                gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+                
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, 32, 32);
+                
+                const texture = new THREE.CanvasTexture(canvas);
+                
+                const material = new THREE.PointsMaterial({
+                    color: 0xffffff,
+                    size: 2,
+                    transparent: true,
+                    opacity: 0.8,
+                    map: texture,
+                    alphaTest: 0.001,
+                    depthWrite: false
+                });
+                
+                // パーティクルシステム作成
+                this.particles = new THREE.Points(geometry, material);
+                this.scene.add(this.particles);
+                
+                console.log('Particles created successfully!');
+            }
+            
+            setupControls() {
+                const startBtn = document.getElementById('startBtn');
+                const stopBtn = document.getElementById('stopBtn');
+                const sensitivitySlider = document.getElementById('sensitivity');
+                const sensitivityValue = document.getElementById('sensitivityValue');
+                const particleCountSlider = document.getElementById('particleCount');
+                const particleCountValue = document.getElementById('particleCountValue');
+                
+                startBtn.addEventListener('click', () => this.startAudio());
+                stopBtn.addEventListener('click', () => this.stopAudio());
+                
+                sensitivitySlider.addEventListener('input', (e) => {
+                    this.sensitivity = parseFloat(e.target.value);
+                    sensitivityValue.textContent = this.sensitivity.toFixed(1);
+                });
+                
+                particleCountSlider.addEventListener('input', (e) => {
+                    this.particleCount = parseInt(e.target.value);
+                    particleCountValue.textContent = this.particleCount;
+                    this.createParticles(); // パーティクル数変更時に再生成
+                });
+            }
+            
+            setupEventListeners() {
+                window.addEventListener('resize', () => {
+                    this.camera.aspect = window.innerWidth / window.innerHeight;
+                    this.camera.updateProjectionMatrix();
+                    this.renderer.setSize(window.innerWidth, window.innerHeight);
+                });
+            }
+            
+            async loadAudioDevices() {
+                try {
+                    const devices = await navigator.mediaDevices.enumerateDevices();
+                    const audioInputs = devices.filter(device => device.kind === 'audioinput');
+                    const select = document.getElementById('deviceSelect');
+                    
+                    select.innerHTML = '<option value="">Default</option>';
+                    audioInputs.forEach(device => {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.textContent = device.label || `Audio Device ${device.deviceId.substring(0, 8)}`;
+                        select.appendChild(option);
+                    });
+                } catch (error) {
+                    console.error('Error loading audio devices:', error);
+                }
+            }
+            
+            async startAudio() {
+                try {
+                    console.log('Starting audio input...');
+                    document.getElementById('status').textContent = 'Starting...';
+                    
+                    const deviceSelect = document.getElementById('deviceSelect');
+                    const deviceId = deviceSelect.value;
+                    
+                    const constraints = {
+                        audio: {
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                            autoGainControl: false,
+                            ...(deviceId && { deviceId: { exact: deviceId } })
+                        }
+                    };
+                    
+                    this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    this.source = this.audioContext.createMediaStreamSource(this.stream);
+                    
+                    // アナライザー設定
+                    this.analyser = this.audioContext.createAnalyser();
+                    this.analyser.fftSize = 256; // 小さくして処理を軽く
+                    this.analyser.smoothingTimeConstant = 0.8; // スムージング
+                    this.source.connect(this.analyser);
+                    
+                    this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+                    
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    document.getElementById('status').textContent = 'Audio Active!';
+                    
+                    console.log('Audio started successfully!');
+                } catch (error) {
+                    console.error('Audio error:', error);
+                    document.getElementById('status').textContent = 'Audio Error: ' + error.message;
+                }
+            }
+            
+            stopAudio() {
+                if (this.stream) {
+                    this.stream.getTracks().forEach(track => track.stop());
+                    this.stream = null;
+                }
+                if (this.audioContext) {
+                    this.audioContext.close();
+                    this.audioContext = null;
+                }
+                
+                this.analyser = null;
+                this.dataArray = null;
+                
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('stopBtn').disabled = true;
+                document.getElementById('status').textContent = 'Stopped';
+                
+                // パーティクルを元の位置に戻す
+                this.resetParticles();
+            }
+            
+            resetParticles() {
+                if (!this.particles || !this.originalPositions) return;
+                
+                const positions = this.particles.geometry.attributes.position.array;
+                for (let i = 0; i < this.originalPositions.length; i++) {
+                    positions[i] = this.originalPositions[i];
+                }
+                this.particles.geometry.attributes.position.needsUpdate = true;
+            }
+            
+            startRendering() {
+                const animate = () => {
+                    requestAnimationFrame(animate);
+                    
+                    const time = performance.now() * 0.001;
+                    
+                    // 音声解析
+                    if (this.analyser && this.dataArray) {
+                        this.analyser.getByteFrequencyData(this.dataArray);
+                        
+                        // 全体音量
+                        const rawVolume = this.dataArray.reduce((sum, val) => sum + val, 0) / this.dataArray.length;
+                        this.volume = (rawVolume / 255) * this.sensitivity;
+                        
+                        // 低音域（バス）レベル - より明確に
+                        const bassRange = this.dataArray.slice(0, 8); // 低音域のみ
+                        this.bassLevel = (bassRange.reduce((sum, val) => sum + val, 0) / bassRange.length / 255) * this.sensitivity;
+                        
+                        // UI更新
+                        document.getElementById('volumeLevel').textContent = Math.round(this.volume * 100);
+                        document.getElementById('bassLevel').textContent = Math.round(this.bassLevel * 100);
+                    } else {
+                        // デモ用の動作
+                        this.volume = Math.abs(Math.sin(time * 2)) * 0.5;
+                        this.bassLevel = Math.abs(Math.sin(time)) * 0.7;
+                    }
+                    
+                    // パーティクル更新
+                    this.updateParticles(time);
+                    
+                    // カメラ回転
+                    this.camera.position.x = Math.sin(time * 0.2) * 5;
+                    this.camera.position.y = Math.cos(time * 0.3) * 3;
+                    this.camera.lookAt(0, 0, 0);
+                    
+                    this.renderer.render(this.scene, this.camera);
+                };
+                
+                animate();
+            }
+            
+            updateParticles(time) {
+                if (!this.particles) return;
+                
+                const positions = this.particles.geometry.attributes.position.array;
+                
+                for (let i = 0; i < this.particleCount; i++) {
+                    const i3 = i * 3;
+                    
+                    // オリジナル位置を取得
+                    const origX = this.originalPositions[i3];
+                    const origY = this.originalPositions[i3 + 1];
+                    const origZ = this.originalPositions[i3 + 2];
+                    
+                    // 中心からの距離
+                    const distance = Math.sqrt(origX * origX + origY * origY + origZ * origZ);
+                    
+                    // 音響による変位計算
+                    const volumeEffect = this.volume * 15; // 音量による拡張
+                    const bassEffect = this.bassLevel * 20; // 低音による強い拡張
+                    const timeWave = Math.sin(time * 2 + distance * 0.1) * 5; // 時間による波
+                    
+                    // 総合的な拡張率
+                    const expansion = 1.0 + (volumeEffect + bassEffect) * 0.1 + timeWave * 0.05;
+                    
+                    // 新しい位置を計算
+                    positions[i3] = origX * expansion;
+                    positions[i3 + 1] = origY * expansion;
+                    positions[i3 + 2] = origZ * expansion;
+                }
+                
+                // ジオメトリ更新
+                this.particles.geometry.attributes.position.needsUpdate = true;
+                
+                // パーティクル全体の回転
+                this.particles.rotation.y += 0.005 + this.volume * 0.02;
+                this.particles.rotation.x += 0.003 + this.bassLevel * 0.01;
+                
+                // 色の変化
+                const hue = (time * 0.1 + this.volume) % 1;
+                this.particles.material.color.setHSL(hue, 0.8, 0.6 + this.bassLevel * 0.4);
+                
+                // サイズの変化
+                this.particles.material.size = 2 + this.bassLevel * 3;
+                
+                // 透明度の変化
+                this.particles.material.opacity = 0.6 + this.volume * 0.4;
+            }
+        }
+
+        // 初期化
+        let particleSystem;
+        
+        window.addEventListener('load', () => {
+            console.log('Page loaded, starting particle system...');
+            particleSystem = new SimpleParticleSystem();
+        });
+        
+        // Three.jsロード確認
+        if (typeof THREE === 'undefined') {
+            console.error('THREE.js failed to load');
+            document.getElementById('status').textContent = 'Error: THREE.js failed to load';
+        } else {
+            console.log('THREE.js loaded successfully');
+        }
+    </script>
+</body>
+</html>
