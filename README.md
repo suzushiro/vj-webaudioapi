@@ -124,7 +124,7 @@ analyser.fftSize = 256;           // 高速処理用
 analyser.smoothingTimeConstant = 0.8;  // スムージング
 ```
 
-### 音楽ジャンル別推奨設定
+### 音楽ジャンル別推奨設定(未検証)
 
 | ジャンル | Sensitivity | Particle Count | 特徴 |
 |---------|-------------|----------------|------|
